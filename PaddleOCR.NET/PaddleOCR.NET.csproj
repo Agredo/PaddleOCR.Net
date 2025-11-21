@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>PaddleOCR.NET</RootNamespace>
+    <AssemblyName>PaddleOCR.NET</AssemblyName>
+    <Description>ONNX-based PaddleOCR implementation for .NET with Fluent API</Description>
+    <PackageTags>ocr;paddleocr;onnx;text-detection;text-recognition</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="Detection\**" />
+    <EmbeddedResource Remove="Detection\**" />
+    <None Remove="Detection\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.23.2" />
+    <PackageReference Include="SkiaSharp" Version="3.119.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include="Models\Preprocessing\Orientation\Document\" />
+    <Folder Include="Models\Preprocessing\Orientation\Textline\" />
+    <Folder Include="Models\Preprocessing\Unwarping\" />
+    <Folder Include="Models\Recognition\" />
+  </ItemGroup>
+
+</Project>

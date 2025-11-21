@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="PaddleOCR.NET.Console/PaddleOCR.NET.Console.csproj" Id="d960c860-28fa-410d-bc16-034265f512f5" />
+  <Project Path="PaddleOCR.NET/PaddleOCR.NET.csproj" />
+</Solution>
