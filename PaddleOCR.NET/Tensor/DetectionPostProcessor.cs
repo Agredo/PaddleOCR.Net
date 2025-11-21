@@ -31,56 +31,141 @@ public static class DetectionPostProcessor
     {
         var boxes = new List<BoundingBox>();
 
-        // Output is a probability map with shape [1, 1, H, W]
-        // Detection models typically downsample by 4x
+        // Output is a probability map - typically downsampled 4x
         var mapHeight = paddedHeight / 4;
         var mapWidth = paddedWidth / 4;
 
-        // Apply threshold and find contours
+        Console.WriteLine($"[POST-PROCESS] Starting box extraction:");
+        Console.WriteLine($"  Map dimensions: {mapWidth}x{mapHeight}");
+        Console.WriteLine($"  Thresholds: detection={threshold}, box={boxThreshold}");
+
+        // Verify output dimensions match expectations
+        if (output.Length != mapWidth * mapHeight)
+        {
+            Console.WriteLine($"[WARNING] Output length mismatch!");
+            Console.WriteLine($"  Expected: {mapWidth * mapHeight}, Got: {output.Length}");
+            
+            // Try to infer actual dimensions
+            var possibleWidth = (int)Math.Sqrt(output.Length);
+            if (possibleWidth * possibleWidth == output.Length)
+            {
+                mapWidth = possibleWidth;
+                mapHeight = possibleWidth;
+                Console.WriteLine($"[INFO] Adjusted to square: {mapWidth}x{mapHeight}");
+            }
+            else
+            {
+                // Try different aspect ratios
+                for (int w = 1; w <= output.Length; w++)
+                {
+                    if (output.Length % w == 0)
+                    {
+                        int h = output.Length / w;
+                        if (Math.Abs((float)w / h - (float)paddedWidth / paddedHeight) < 0.1f)
+                        {
+                            mapWidth = w;
+                            mapHeight = h;
+                            Console.WriteLine($"[INFO] Adjusted to: {mapWidth}x{mapHeight}");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Create binary map
         var binaryMap = new bool[mapHeight, mapWidth];
+        var pixelsAboveThreshold = 0;
+        
         for (int y = 0; y < mapHeight; y++)
         {
             for (int x = 0; x < mapWidth; x++)
             {
                 var idx = y * mapWidth + x;
-                binaryMap[y, x] = idx < output.Length && output[idx] > threshold;
+                if (idx < output.Length && output[idx] > threshold)
+                {
+                    binaryMap[y, x] = true;
+                    pixelsAboveThreshold++;
+                }
             }
+        }
+
+        Console.WriteLine($"  Binary map: {pixelsAboveThreshold} pixels above threshold ({100.0 * pixelsAboveThreshold / (mapWidth * mapHeight):F2}%)");
+
+        if (pixelsAboveThreshold == 0)
+        {
+            Console.WriteLine("[WARNING] No pixels above threshold! Try lowering the threshold value.");
+            return boxes;
         }
 
         // Extract contours
         var contours = ExtractContours(binaryMap);
-        
-        // Calculate scaling factors
-        var scaleX = (float)originalSize.Width / resizedWidth;
-        var scaleY = (float)originalSize.Height / resizedHeight;
+        Console.WriteLine($"  Found {contours.Count} contours");
 
+        // Calculate direct scaling from map space to original image space
+        // The model downsamples by 4x, so map dimensions are paddedWidth/4 and paddedHeight/4
+        // We need to scale directly from map coordinates to original image coordinates
+        var mapToOriginalScaleX = (float)originalSize.Width / mapWidth;
+        var mapToOriginalScaleY = (float)originalSize.Height / mapHeight;
+
+        Console.WriteLine($"  Scaling: mapToOriginal = ({mapToOriginalScaleX:F3}, {mapToOriginalScaleY:F3})");
+
+        int boxIndex = 0;
         foreach (var contour in contours)
         {
-            if (contour.Count < 4) continue;
+            if (contour.Count < 4)
+            {
+                Console.WriteLine($"  Contour {boxIndex}: {contour.Count} points - SKIPPED (too few points)");
+                boxIndex++;
+                continue;
+            }
 
-            // Calculate bounding box
+            // Get bounding rectangle in map space
             var minX = contour.Min(p => p.X);
             var maxX = contour.Max(p => p.X);
             var minY = contour.Min(p => p.Y);
             var maxY = contour.Max(p => p.Y);
+            
+            var mapWidth_box = maxX - minX + 1;
+            var mapHeight_box = maxY - minY + 1;
 
-            // Scale back to original image size
-            var points = new[]
+            // Filter very small detections (likely noise)
+            if (mapWidth_box < 2 || mapHeight_box < 2)
             {
-                new[] { minX * 4 * scaleX, minY * 4 * scaleY },
-                new[] { maxX * 4 * scaleX, minY * 4 * scaleY },
-                new[] { maxX * 4 * scaleX, maxY * 4 * scaleY },
-                new[] { minX * 4 * scaleX, maxY * 4 * scaleY }
-            };
+                Console.WriteLine($"  Contour {boxIndex}: {mapWidth_box}x{mapHeight_box} - SKIPPED (too small)");
+                boxIndex++;
+                continue;
+            }
 
+            // Calculate confidence
             var confidence = CalculateConfidence(output, contour, mapWidth);
             
-            if (confidence > boxThreshold)
+            // Scale directly from map space to original image coordinates
+            var points = new[]
+            {
+                new[] { minX * mapToOriginalScaleX, minY * mapToOriginalScaleY },
+                new[] { maxX * mapToOriginalScaleX, minY * mapToOriginalScaleY },
+                new[] { maxX * mapToOriginalScaleX, maxY * mapToOriginalScaleY },
+                new[] { minX * mapToOriginalScaleX, maxY * mapToOriginalScaleY }
+            };
+
+            Console.WriteLine($"  Contour {boxIndex}: {contour.Count} pts, map=({minX},{minY})-({maxX},{maxY}), conf={confidence:F3}");
+            Console.WriteLine($"    -> Scaled to original: ({points[0][0]:F1},{points[0][1]:F1})-({points[2][0]:F1},{points[2][1]:F1})");
+
+            if (confidence >= boxThreshold)
             {
                 boxes.Add(new BoundingBox(points, confidence));
+                Console.WriteLine($"    -> ADDED (confidence {confidence:F3} >= {boxThreshold})");
             }
+            else
+            {
+                Console.WriteLine($"    -> SKIPPED (confidence {confidence:F3} < {boxThreshold})");
+            }
+            
+            boxIndex++;
         }
 
+        Console.WriteLine($"[POST-PROCESS] Extracted {boxes.Count} boxes from {contours.Count} contours");
         return boxes;
     }
 
