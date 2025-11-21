@@ -10,8 +10,9 @@ void TestDetection()
     // Test with very low thresholds first
     using var detector = new DetectionModelV5Builder()
         .WithModelPath(@"C:\Projects\Models\paddleocr_onnx\paddleocr-onnx\detection\v5\det.onnx")
-        .WithThreshold(0.1f)      // Very low for debugging
-        .WithBoxThreshold(0.1f)   // Very low for debugging
+        .WithThreshold(0.3f)      // Very low for debugging
+        .WithBoxThreshold(0.5f)   // Very low for debugging
+        .WithUnclipRatio(1.6f)
         .Build();
 
     var imageBytes = File.ReadAllBytes(imagePath);
