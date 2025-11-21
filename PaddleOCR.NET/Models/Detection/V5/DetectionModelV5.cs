@@ -52,7 +52,7 @@ public class DetectionModelV5 : IDetectionModel
     /// <inheritdoc/>
     public DetectionResult Detect(byte[] imageData)
     {
-        using var bitmap = SKBitmap.Decode(imageData);
+        using var bitmap = ImageLoader.LoadWithOrientation(imageData);
         if (bitmap == null)
             throw new InvalidOperationException("Failed to decode image");
         

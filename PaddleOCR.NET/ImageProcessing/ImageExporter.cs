@@ -35,8 +35,8 @@ public static class ImageExporter
         var extension = Path.GetExtension(originalImagePath);
         var outputPath = Path.Combine(directory, $"{fileNameWithoutExt}{outputSuffix}{extension}");
 
-        // Load the original image
-        using var bitmap = SKBitmap.Decode(originalImagePath);
+        // Load the original image with orientation correction
+        using var bitmap = ImageLoader.LoadWithOrientation(originalImagePath);
         if (bitmap == null)
             throw new InvalidOperationException($"Failed to decode image: {originalImagePath}");
 
@@ -86,8 +86,8 @@ public static class ImageExporter
         SKEncodedImageFormat format = SKEncodedImageFormat.Png,
         int quality = 95)
     {
-        // Load the original image
-        using var bitmap = SKBitmap.Decode(imageData);
+        // Load the original image with orientation correction
+        using var bitmap = ImageLoader.LoadWithOrientation(imageData);
         if (bitmap == null)
             throw new InvalidOperationException("Failed to decode image data");
 
