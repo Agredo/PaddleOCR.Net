@@ -23,14 +23,14 @@ public class DetectionModelV5 : IDetectionModel
     /// </summary>
     /// <param name="modelPath">Path to the det.onnx file</param>
     /// <param name="targetSize">Target size for the longer image side (default: 960)</param>
-    /// <param name="threshold">Detection threshold (default: 0.3)</param>
-    /// <param name="boxThreshold">Bounding box threshold (default: 0.5)</param>
+    /// <param name="threshold">Detection threshold (default: 0.15)</param>
+    /// <param name="boxThreshold">Bounding box threshold (default: 0.3)</param>
     /// <param name="unclipRatio">Ratio for expanding boxes (default: 1.6)</param>
     public DetectionModelV5(
         string modelPath, 
         int targetSize = 960,
-        float threshold = 0.3f,
-        float boxThreshold = 0.5f,
+        float threshold = 0.15f,
+        float boxThreshold = 0.3f,
         float unclipRatio = 1.6f)
     {
         if (!File.Exists(modelPath))
@@ -102,6 +102,21 @@ public class DetectionModelV5 : IDetectionModel
 
         using var results = session.Run(inputs);
         var output = results.First().AsEnumerable<float>().ToArray();
+        
+        // Debug output analysis
+        Console.WriteLine($"[DEBUG] Model Output Analysis:");
+        Console.WriteLine($"  Output array length: {output.Length}");
+        Console.WriteLine($"  Expected dimensions: {paddedWidth / 4}x{paddedHeight / 4} = {(paddedWidth / 4) * (paddedHeight / 4)}");
+        Console.WriteLine($"  Min value: {output.Min():F6}");
+        Console.WriteLine($"  Max value: {output.Max():F6}");
+        Console.WriteLine($"  Mean value: {output.Average():F6}");
+
+        // Analyze value distribution
+        var aboveThreshold03 = output.Count(v => v > 0.3f);
+        var aboveThreshold01 = output.Count(v => v > 0.1f);
+        Console.WriteLine($"  Values > 0.3: {aboveThreshold03} ({100.0 * aboveThreshold03 / output.Length:F2}%)");
+        Console.WriteLine($"  Values > 0.1: {aboveThreshold01} ({100.0 * aboveThreshold01 / output.Length:F2}%)");
+        Console.WriteLine($"  Thresholds: detection={threshold}, box={boxThreshold}");
         
         // Extract bounding boxes
         var boxes = DetectionPostProcessor.ExtractBoxes(

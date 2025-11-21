@@ -7,8 +7,8 @@ public class DetectionModelV5Builder
 {
     private string? modelPath;
     private int targetSize = 960;
-    private float threshold = 0.3f;
-    private float boxThreshold = 0.5f;
+    private float threshold = 0.15f;
+    private float boxThreshold = 0.3f;
     private float unclipRatio = 1.6f;
 
     /// <summary>
