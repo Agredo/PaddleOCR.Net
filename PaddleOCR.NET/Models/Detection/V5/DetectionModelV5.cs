@@ -127,7 +127,8 @@ public class DetectionModelV5 : IDetectionModel
             resizedHeight, 
             originalSize,
             threshold,
-            boxThreshold);
+            boxThreshold,
+            unclipRatio);
 
         return new DetectionResult
         {

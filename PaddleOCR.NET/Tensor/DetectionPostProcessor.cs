@@ -18,6 +18,7 @@ public static class DetectionPostProcessor
     /// <param name="originalSize">Original image size</param>
     /// <param name="threshold">Detection threshold (default: 0.3)</param>
     /// <param name="boxThreshold">Box confidence threshold (default: 0.5)</param>
+    /// <param name="unclipRatio">Ratio for expanding boxes (default: 1.6)</param>
     /// <returns>List of bounding boxes</returns>
     public static List<BoundingBox> ExtractBoxes(
         float[] output,
@@ -27,7 +28,8 @@ public static class DetectionPostProcessor
         int resizedHeight,
         (int Width, int Height) originalSize,
         float threshold = 0.3f,
-        float boxThreshold = 0.5f)
+        float boxThreshold = 0.5f,
+        float unclipRatio = 1.6f)
     {
         var boxes = new List<BoundingBox>();
 
@@ -38,6 +40,7 @@ public static class DetectionPostProcessor
         Console.WriteLine($"[POST-PROCESS] Starting box extraction:");
         Console.WriteLine($"  Map dimensions: {mapWidth}x{mapHeight}");
         Console.WriteLine($"  Thresholds: detection={threshold}, box={boxThreshold}");
+        Console.WriteLine($"  Unclip ratio: {unclipRatio}");
 
         // Verify output dimensions match expectations
         if (output.Length != mapWidth * mapHeight)
@@ -141,16 +144,44 @@ public static class DetectionPostProcessor
             var confidence = CalculateConfidence(output, contour, mapWidth);
             
             // Scale directly from map space to original image coordinates
+            var originalMinX = minX * mapToOriginalScaleX;
+            var originalMaxX = maxX * mapToOriginalScaleX;
+            var originalMinY = minY * mapToOriginalScaleY;
+            var originalMaxY = maxY * mapToOriginalScaleY;
+
+            // Calculate center point and current dimensions
+            var centerX = (originalMinX + originalMaxX) / 2f;
+            var centerY = (originalMinY + originalMaxY) / 2f;
+            var currentWidth = originalMaxX - originalMinX;
+            var currentHeight = originalMaxY - originalMinY;
+
+            // Expand box using unclipRatio
+            var newWidth = currentWidth * unclipRatio;
+            var newHeight = currentHeight * unclipRatio;
+
+            // Calculate new corners around center point
+            var expandedMinX = centerX - newWidth / 2f;
+            var expandedMaxX = centerX + newWidth / 2f;
+            var expandedMinY = centerY - newHeight / 2f;
+            var expandedMaxY = centerY + newHeight / 2f;
+
+            // Clamp to image bounds
+            expandedMinX = Math.Max(0, expandedMinX);
+            expandedMaxX = Math.Min(originalSize.Width, expandedMaxX);
+            expandedMinY = Math.Max(0, expandedMinY);
+            expandedMaxY = Math.Min(originalSize.Height, expandedMaxY);
+
             var points = new[]
             {
-                new[] { minX * mapToOriginalScaleX, minY * mapToOriginalScaleY },
-                new[] { maxX * mapToOriginalScaleX, minY * mapToOriginalScaleY },
-                new[] { maxX * mapToOriginalScaleX, maxY * mapToOriginalScaleY },
-                new[] { minX * mapToOriginalScaleX, maxY * mapToOriginalScaleY }
+                new[] { expandedMinX, expandedMinY },
+                new[] { expandedMaxX, expandedMinY },
+                new[] { expandedMaxX, expandedMaxY },
+                new[] { expandedMinX, expandedMaxY }
             };
 
             Console.WriteLine($"  Contour {boxIndex}: {contour.Count} pts, map=({minX},{minY})-({maxX},{maxY}), conf={confidence:F3}");
-            Console.WriteLine($"    -> Scaled to original: ({points[0][0]:F1},{points[0][1]:F1})-({points[2][0]:F1},{points[2][1]:F1})");
+            Console.WriteLine($"    -> Original scaled: ({originalMinX:F1},{originalMinY:F1})-({originalMaxX:F1},{originalMaxY:F1})");
+            Console.WriteLine($"    -> Expanded ({unclipRatio}x): ({expandedMinX:F1},{expandedMinY:F1})-({expandedMaxX:F1},{expandedMaxY:F1})");
 
             if (confidence >= boxThreshold)
             {
