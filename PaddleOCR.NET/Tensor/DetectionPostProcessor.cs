@@ -1,4 +1,6 @@
-using PaddleOCR.NET.Models.Detection;
+﻿using PaddleOCR.NET.Models.Detection;
+using Clipper2Lib;
+using System.Drawing;
 
 namespace PaddleOCR.NET.Tensor;
 
@@ -7,6 +9,372 @@ namespace PaddleOCR.NET.Tensor;
 /// </summary>
 public static class DetectionPostProcessor
 {
+    /// <summary>
+    /// Represents a minimum area rotated rectangle
+    /// </summary>
+    public class MinimumAreaRectangle
+    {
+        /// <summary>
+        /// Center point of the rectangle
+        /// </summary>
+        public PointF Center { get; init; }
+
+        /// <summary>
+        /// Size of the rectangle (width, height)
+        /// </summary>
+        public SizeF Size { get; init; }
+
+        /// <summary>
+        /// Rotation angle in degrees (0-180)
+        /// </summary>
+        public float Angle { get; init; }
+
+        /// <summary>
+        /// Gets the four corner points of the rectangle in clockwise order starting from top-left
+        /// </summary>
+        public PointF[] GetCornerPoints()
+        {
+            var halfWidth = Size.Width / 2f;
+            var halfHeight = Size.Height / 2f;
+
+            // Create corners in local space (centered at origin)
+            var corners = new[]
+            {
+                new PointF(-halfWidth, -halfHeight), // Top-left
+                new PointF(halfWidth, -halfHeight),  // Top-right
+                new PointF(halfWidth, halfHeight),   // Bottom-right
+                new PointF(-halfWidth, halfHeight)   // Bottom-left
+            };
+
+            // Rotate and translate to center position
+            var angleRad = Angle * Math.PI / 180.0;
+            var cos = (float)Math.Cos(angleRad);
+            var sin = (float)Math.Sin(angleRad);
+
+            for (int i = 0; i < corners.Length; i++)
+            {
+                var x = corners[i].X * cos - corners[i].Y * sin + Center.X;
+                var y = corners[i].X * sin + corners[i].Y * cos + Center.Y;
+                corners[i] = new PointF(x, y);
+            }
+
+            return corners;
+        }
+
+        /// <summary>
+        /// Finds the minimum area rectangle that encloses a contour
+        /// </summary>
+        public static MinimumAreaRectangle FromContour(List<(int X, int Y)> contour)
+        {
+            if (contour.Count < 3)
+            {
+                // Degenerate case - return simple bounds
+                var minX = contour.Min(p => p.X);
+                var maxX = contour.Max(p => p.X);
+                var minY = contour.Min(p => p.Y);
+                var maxY = contour.Max(p => p.Y);
+                
+                return new MinimumAreaRectangle
+                {
+                    Center = new PointF((minX + maxX) / 2f, (minY + maxY) / 2f),
+                    Size = new SizeF(maxX - minX, maxY - minY),
+                    Angle = 0f
+                };
+            }
+
+            // Convert to PointF for calculations
+            var points = contour.Select(p => new PointF(p.X, p.Y)).ToList();
+
+            // Calculate centroid
+            var centroidX = points.Average(p => p.X);
+            var centroidY = points.Average(p => p.Y);
+            var centroid = new PointF(centroidX, centroidY);
+
+            // Try different rotation angles to find minimum area
+            var minArea = float.MaxValue;
+            var bestAngle = 0f;
+            var bestBounds = RectangleF.Empty;
+
+            // Test angles from 0° to 180° in 5° increments
+            for (int angleDeg = 0; angleDeg < 180; angleDeg += 5)
+            {
+                var angleRad = angleDeg * Math.PI / 180.0;
+                var cos = Math.Cos(angleRad);
+                var sin = Math.Sin(angleRad);
+
+                // Rotate all points around centroid
+                var rotatedPoints = new List<PointF>();
+                foreach (var point in points)
+                {
+                    var dx = point.X - centroid.X;
+                    var dy = point.Y - centroid.Y;
+                    var rotatedX = (float)(dx * cos - dy * sin);
+                    var rotatedY = (float)(dx * sin + dy * cos);
+                    rotatedPoints.Add(new PointF(rotatedX, rotatedY));
+                }
+
+                // Get axis-aligned bounds of rotated points
+                var bounds = GetAxisAlignedBounds(rotatedPoints);
+                var area = bounds.Width * bounds.Height;
+
+                if (area < minArea)
+                {
+                    minArea = area;
+                    bestAngle = angleDeg;
+                    bestBounds = bounds;
+                }
+            }
+
+            return new MinimumAreaRectangle
+            {
+                Center = centroid,
+                Size = bestBounds.Size,
+                Angle = bestAngle
+            };
+        }
+    }
+
+    /// <summary>
+    /// Dilates a binary map using morphological dilation
+    /// </summary>
+    /// <param name="binaryMap">Input binary map</param>
+    /// <param name="kernelSize">Size of the dilation kernel (default: 2)</param>
+    /// <returns>Dilated binary map</returns>
+    private static bool[,] DilateBinaryMap(bool[,] binaryMap, int kernelSize = 2)
+    {
+        var height = binaryMap.GetLength(0);
+        var width = binaryMap.GetLength(1);
+        var dilated = new bool[height, width];
+
+        var halfKernel = kernelSize / 2;
+
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                // Check if any pixel in the kernel neighborhood is set
+                var shouldSet = false;
+                for (int ky = -halfKernel; ky < kernelSize - halfKernel; ky++)
+                {
+                    for (int kx = -halfKernel; kx < kernelSize - halfKernel; kx++)
+                    {
+                        var ny = y + ky;
+                        var nx = x + kx;
+                        
+                        if (ny >= 0 && ny < height && nx >= 0 && nx < width && binaryMap[ny, nx])
+                        {
+                            shouldSet = true;
+                            break;
+                        }
+                    }
+                    if (shouldSet) break;
+                }
+
+                dilated[y, x] = shouldSet;
+            }
+        }
+
+        return dilated;
+    }
+
+    /// <summary>
+    /// Calculates the area of a polygon using the Shoelace formula
+    /// </summary>
+    private static float CalculatePolygonArea(List<(float X, float Y)> polygon)
+    {
+        if (polygon.Count < 3)
+            return 0f;
+
+        var area = 0f;
+        for (int i = 0; i < polygon.Count; i++)
+        {
+            var j = (i + 1) % polygon.Count;
+            area += polygon[i].X * polygon[j].Y;
+            area -= polygon[j].X * polygon[i].Y;
+        }
+
+        return Math.Abs(area) / 2f;
+    }
+
+    /// <summary>
+    /// Calculates the perimeter of a polygon
+    /// </summary>
+    private static float CalculatePolygonPerimeter(List<(float X, float Y)> polygon)
+    {
+        if (polygon.Count < 2)
+            return 0f;
+
+        var perimeter = 0f;
+        for (int i = 0; i < polygon.Count; i++)
+        {
+            var j = (i + 1) % polygon.Count;
+            var dx = polygon[j].X - polygon[i].X;
+            var dy = polygon[j].Y - polygon[i].Y;
+            perimeter += (float)Math.Sqrt(dx * dx + dy * dy);
+        }
+
+        return perimeter;
+    }
+
+    /// <summary>
+    /// Expands a polygon using Clipper2 offset algorithm
+    /// </summary>
+    private static List<(float X, float Y)> ExpandPolygonWithClipper(
+        List<(float X, float Y)> polygon, 
+        float unclipRatio)
+    {
+        if (polygon.Count < 3)
+            return polygon;
+
+        var area = CalculatePolygonArea(polygon);
+        var perimeter = CalculatePolygonPerimeter(polygon);
+        
+        if (perimeter <= 0)
+            return polygon;
+
+        var distance = area * unclipRatio / perimeter;
+
+        // Clipper2 ClipperOffset works with integer coordinates (Path64)
+        // We need to scale our float coordinates to integers, process, then scale back
+        const double scale = 1000.0; // Scale factor for precision
+        
+        // Convert to Path64 (integer coordinates) with scaling
+        var path = new Path64(polygon.Select(p => new Point64(
+            (long)(p.X * scale),
+            (long)(p.Y * scale)
+        )));
+
+        // Scale the distance as well
+        var scaledDistance = distance * scale;
+
+        // Expand using ClipperOffset
+        var co = new ClipperOffset();
+        co.AddPath(path, JoinType.Round, EndType.Polygon);
+        var solution = new Paths64();
+        co.Execute(scaledDistance, solution);
+
+        // Convert back and return first solution
+        if (solution.Count > 0 && solution[0].Count >= 3)
+        {
+            return solution[0].Select(pt => (
+                (float)(pt.X / scale),
+                (float)(pt.Y / scale)
+            )).ToList();
+        }
+
+        return polygon;
+    }
+
+    /// <summary>
+    /// Simplifies a polygon to a quadrilateral (4 corners) by finding the minimum area rotated rectangle
+    /// </summary>
+    /// <param name="polygon">Input polygon with any number of points</param>
+    /// <returns>Quadrilateral with exactly 4 corners</returns>
+    private static List<(float X, float Y)> SimplifyPolygonToQuadrilateral(List<(float X, float Y)> polygon)
+    {
+        if (polygon.Count == 4)
+            return polygon;
+
+        if (polygon.Count < 4)
+        {
+            // Pad with duplicate points if less than 4
+            var result = polygon.ToList();
+            while (result.Count < 4)
+                result.Add(result[result.Count - 1]);
+            return result;
+        }
+
+        // For polygons with more than 4 points, find the minimum area rotated rectangle
+        // Calculate centroid
+        var centroidX = polygon.Average(p => p.X);
+        var centroidY = polygon.Average(p => p.Y);
+
+        var minArea = float.MaxValue;
+        var bestCorners = new List<(float X, float Y)>();
+
+        // Try different rotation angles to find minimum area bounding box
+        for (int angleDeg = 0; angleDeg < 180; angleDeg += 5)
+        {
+            var angleRad = angleDeg * Math.PI / 180.0;
+            var cos = Math.Cos(angleRad);
+            var sin = Math.Sin(angleRad);
+
+            // Rotate all points around centroid
+            var minX = float.MaxValue;
+            var maxX = float.MinValue;
+            var minY = float.MaxValue;
+            var maxY = float.MinValue;
+
+            foreach (var point in polygon)
+            {
+                var dx = point.X - centroidX;
+                var dy = point.Y - centroidY;
+                var rotatedX = (float)(dx * cos - dy * sin);
+                var rotatedY = (float)(dx * sin + dy * cos);
+
+                minX = Math.Min(minX, rotatedX);
+                maxX = Math.Max(maxX, rotatedX);
+                minY = Math.Min(minY, rotatedY);
+                maxY = Math.Max(maxY, rotatedY);
+            }
+
+            var area = (maxX - minX) * (maxY - minY);
+            
+            if (area < minArea)
+            {
+                minArea = area;
+
+                // Rotate corners back to original space
+                var corners = new[]
+                {
+                    (minX, minY), // Top-left
+                    (maxX, minY), // Top-right
+                    (maxX, maxY), // Bottom-right
+                    (minX, maxY)  // Bottom-left
+                };
+
+                bestCorners = corners.Select(c =>
+                {
+                    var x = (float)(c.Item1 * cos + c.Item2 * sin + centroidX);
+                    var y = (float)(-c.Item1 * sin + c.Item2 * cos + centroidY);
+                    return (x, y);
+                }).ToList();
+            }
+        }
+
+        return bestCorners.Count == 4 ? bestCorners : polygon.Take(4).ToList();
+    }
+
+    /// <summary>
+    /// Rotates a point around the origin
+    /// </summary>
+    private static PointF RotatePoint(PointF point, float angleDegrees)
+    {
+        var angleRad = angleDegrees * Math.PI / 180.0;
+        var cos = Math.Cos(angleRad);
+        var sin = Math.Sin(angleRad);
+        return new PointF(
+            (float)(point.X * cos - point.Y * sin),
+            (float)(point.X * sin + point.Y * cos)
+        );
+    }
+
+    /// <summary>
+    /// Gets the axis-aligned bounding rectangle of a set of points
+    /// </summary>
+    private static RectangleF GetAxisAlignedBounds(IEnumerable<PointF> points)
+    {
+        var pointsList = points.ToList();
+        if (pointsList.Count == 0)
+            return RectangleF.Empty;
+
+        var minX = pointsList.Min(p => p.X);
+        var maxX = pointsList.Max(p => p.X);
+        var minY = pointsList.Min(p => p.Y);
+        var maxY = pointsList.Max(p => p.Y);
+        return new RectangleF(minX, minY, maxX - minX, maxY - minY);
+    }
+
     /// <summary>
     /// Extracts bounding boxes from detection model output
     /// </summary>
@@ -51,10 +419,8 @@ public static class DetectionPostProcessor
             Console.WriteLine($"  Expected: {mapWidth * mapHeight}, Got: {output.Length}");
             
             // Try to infer actual dimensions by testing common downsampling factors
-            // The model processes the PADDED image and downsamples that
             bool dimensionsFound = false;
             
-            // Try common downsampling factors (2x, 4x, 8x) from PADDED dimensions
             foreach (var downsample in new[] { 2, 4, 8 })
             {
                 var testWidth = paddedWidth / downsample;
@@ -70,13 +436,11 @@ public static class DetectionPostProcessor
                 }
             }
             
-            // If common factors didn't work, try to find dimensions that match aspect ratio
             if (!dimensionsFound)
             {
                 var targetAspectRatio = (float)paddedWidth / paddedHeight;
                 var bestMatch = (width: mapWidth, height: mapHeight, diff: float.MaxValue);
                 
-                // Try different widths
                 for (int w = 10; w <= paddedWidth; w++)
                 {
                     if (output.Length % w == 0)
@@ -85,7 +449,6 @@ public static class DetectionPostProcessor
                         var aspectRatio = (float)w / h;
                         var aspectDiff = Math.Abs(aspectRatio - targetAspectRatio);
                         
-                        // Find best aspect ratio match
                         if (aspectDiff < bestMatch.diff)
                         {
                             bestMatch = (w, h, aspectDiff);
@@ -93,7 +456,7 @@ public static class DetectionPostProcessor
                     }
                 }
                 
-                if (bestMatch.diff < 0.15f) // Allow some tolerance in aspect ratio
+                if (bestMatch.diff < 0.15f)
                 {
                     mapWidth = bestMatch.width;
                     mapHeight = bestMatch.height;
@@ -138,19 +501,17 @@ public static class DetectionPostProcessor
             return boxes;
         }
 
+        // Apply dilation to fill small gaps
+        binaryMap = DilateBinaryMap(binaryMap, kernelSize: 2);
+        Console.WriteLine($"  Applied dilation with 2x2 kernel");
+
         // Extract contours
         var contours = ExtractContours(binaryMap);
         Console.WriteLine($"  Found {contours.Count} contours");
 
-        // Calculate proper coordinate scaling:
-        // The model output map dimensions were inferred above (mapWidth x mapHeight)
-        // We need to scale from map space ? resized space ? original space
-        
-        // Step 1: Map ? Resized (direct scale based on actual dimensions)
+        // Calculate proper coordinate scaling
         var mapToResizedScaleX = (float)resizedWidth / mapWidth;
         var mapToResizedScaleY = (float)resizedHeight / mapHeight;
-        
-        // Step 2: Resized ? Original
         var resizedToOriginalScaleX = (float)originalSize.Width / resizedWidth;
         var resizedToOriginalScaleY = (float)originalSize.Height / resizedHeight;
 
@@ -167,72 +528,54 @@ public static class DetectionPostProcessor
                 continue;
             }
 
-            // Get bounding rectangle in map space
-            var minX = contour.Min(p => p.X);
-            var maxX = contour.Max(p => p.X);
-            var minY = contour.Min(p => p.Y);
-            var maxY = contour.Max(p => p.Y);
-            
-            var mapWidth_box = maxX - minX + 1;
-            var mapHeight_box = maxY - minY + 1;
+            // Find minimum area rotated rectangle
+            var minRect = MinimumAreaRectangle.FromContour(contour);
+            var rectCorners = minRect.GetCornerPoints();
 
-            // Filter very small detections (likely noise)
-            if (mapWidth_box < 2 || mapHeight_box < 2)
+            Console.WriteLine($"  Contour {boxIndex}: {contour.Count} pts, minAreaRect center=({minRect.Center.X:F1},{minRect.Center.Y:F1}), size={minRect.Size.Width:F1}x{minRect.Size.Height:F1}, angle={minRect.Angle:F1}°");
+
+            // Filter very small detections
+            if (minRect.Size.Width < 2 || minRect.Size.Height < 2)
             {
-                Console.WriteLine($"  Contour {boxIndex}: {mapWidth_box}x{mapHeight_box} - SKIPPED (too small)");
+                Console.WriteLine($"    -> SKIPPED (too small)");
                 boxIndex++;
                 continue;
             }
 
             // Calculate confidence
             var confidence = CalculateConfidence(output, contour, mapWidth);
-            
-            // Scale from map space to resized space
-            var resizedMinX = minX * mapToResizedScaleX;
-            var resizedMaxX = maxX * mapToResizedScaleX;
-            var resizedMinY = minY * mapToResizedScaleY;
-            var resizedMaxY = maxY * mapToResizedScaleY;
-            
-            // Scale from resized space to original image space
-            var originalMinX = resizedMinX * resizedToOriginalScaleX;
-            var originalMaxX = resizedMaxX * resizedToOriginalScaleX;
-            var originalMinY = resizedMinY * resizedToOriginalScaleY;
-            var originalMaxY = resizedMaxY * resizedToOriginalScaleY;
 
-            // Calculate center point and current dimensions
-            var centerX = (originalMinX + originalMaxX) / 2f;
-            var centerY = (originalMinY + originalMaxY) / 2f;
-            var currentWidth = originalMaxX - originalMinX;
-            var currentHeight = originalMaxY - originalMinY;
+            // Scale corners to resized space
+            var scaledCorners = rectCorners.Select(p => new PointF(
+                p.X * mapToResizedScaleX,
+                p.Y * mapToResizedScaleY
+            )).ToList();
 
-            // Expand box using unclipRatio
-            var newWidth = currentWidth * unclipRatio;
-            var newHeight = currentHeight * unclipRatio;
+            // Convert to list of tuples for expansion
+            var polygon = scaledCorners.Select(p => (p.X, p.Y)).ToList();
 
-            // Calculate new corners around center point
-            var expandedMinX = centerX - newWidth / 2f;
-            var expandedMaxX = centerX + newWidth / 2f;
-            var expandedMinY = centerY - newHeight / 2f;
-            var expandedMaxY = centerY + newHeight / 2f;
+            // Expand using Clipper2
+            var expandedPolygon = ExpandPolygonWithClipper(polygon, unclipRatio);
+
+            // Scale to original image space
+            var finalPolygon = expandedPolygon.Select(p => (
+                p.X * resizedToOriginalScaleX,
+                p.Y * resizedToOriginalScaleY
+            )).ToList();
 
             // Clamp to image bounds
-            expandedMinX = Math.Max(0, expandedMinX);
-            expandedMaxX = Math.Min(originalSize.Width, expandedMaxX);
-            expandedMinY = Math.Max(0, expandedMinY);
-            expandedMaxY = Math.Min(originalSize.Height, expandedMaxY);
+            var clampedPolygon = finalPolygon.Select(p => (
+                X: Math.Max(0f, Math.Min((float)originalSize.Width, p.Item1)),
+                Y: Math.Max(0f, Math.Min((float)originalSize.Height, p.Item2))
+            )).ToList();
 
-            var points = new[]
-            {
-                new[] { expandedMinX, expandedMinY },
-                new[] { expandedMaxX, expandedMinY },
-                new[] { expandedMaxX, expandedMaxY },
-                new[] { expandedMinX, expandedMaxY }
-            };
+            // Simplify to exactly 4 corners for BoundingBox compatibility
+            var quadrilateral = SimplifyPolygonToQuadrilateral(clampedPolygon);
 
-            Console.WriteLine($"  Contour {boxIndex}: {contour.Count} pts, map=({minX},{minY})-({maxX},{maxY}), conf={confidence:F3}");
-            Console.WriteLine($"    -> Resized: ({resizedMinX:F1},{resizedMinY:F1})-({resizedMaxX:F1},{resizedMaxY:F1})");
-            Console.WriteLine($"    -> Original: ({originalMinX:F1},{originalMinY:F1})-({originalMaxX:F1},{originalMaxY:F1})");
-            Console.WriteLine($"    -> Expanded ({unclipRatio}x): ({expandedMinX:F1},{expandedMinY:F1})-({expandedMaxX:F1},{expandedMaxY:F1})");
+            // Convert to array format for BoundingBox
+            var points = quadrilateral.Select(p => new[] { p.X, p.Y }).ToArray();
+
+            Console.WriteLine($"    -> Expanded polygon: {expandedPolygon.Count} points -> simplified to 4 corners, conf={confidence:F3}");
 
             if (confidence >= boxThreshold)
             {
