@@ -267,10 +267,14 @@ public static class DetectionPostProcessor
 
     /// <summary>
     /// Simplifies a polygon to a quadrilateral (4 corners) by finding the minimum area rotated rectangle
+    /// with additional padding to ensure complete text coverage
     /// </summary>
     /// <param name="polygon">Input polygon with any number of points</param>
+    /// <param name="paddingFactor">Additional padding factor (default: 1.1 = 10% padding)</param>
     /// <returns>Quadrilateral with exactly 4 corners</returns>
-    private static List<(float X, float Y)> SimplifyPolygonToQuadrilateral(List<(float X, float Y)> polygon)
+    private static List<(float X, float Y)> SimplifyPolygonToQuadrilateral(
+        List<(float X, float Y)> polygon, 
+        float topPaddingFactor = 1.0f, float bottomPaddingFactor = 1.0f, float leftPaddingFactor = 1.0f, float rightPaddingFactor = 1.0f)
     {
         if (polygon.Count == 4)
             return polygon;
@@ -323,6 +327,19 @@ public static class DetectionPostProcessor
             if (area < minArea)
             {
                 minArea = area;
+
+                // Apply padding factor to expand the box slightly
+                var width = maxX - minX;
+                var height = maxY - minY;
+                var paddingXStart = width * (leftPaddingFactor - 1f) / 2f;
+                var paddingXEnd = width * (rightPaddingFactor - 1f) / 2f;
+                var paddingYStart = height * (bottomPaddingFactor - 1f) / 2f;
+                var paddingYEnd = height * (topPaddingFactor - 1f) / 2f;
+
+                minX -= paddingXStart;
+                maxX += paddingXEnd;
+                minY -= paddingYStart;
+                maxY += paddingYEnd;
 
                 // Rotate corners back to original space
                 var corners = new[]
@@ -570,7 +587,7 @@ public static class DetectionPostProcessor
             )).ToList();
 
             // Simplify to exactly 4 corners for BoundingBox compatibility
-            var quadrilateral = SimplifyPolygonToQuadrilateral(clampedPolygon);
+            var quadrilateral = SimplifyPolygonToQuadrilateral(clampedPolygon, rightPaddingFactor:1.35f);
 
             // Convert to array format for BoundingBox
             var points = quadrilateral.Select(p => new[] { p.X, p.Y }).ToArray();

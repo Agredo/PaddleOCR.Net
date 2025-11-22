@@ -5,7 +5,7 @@ void TestDetection()
 {
     Console.WriteLine("=== PaddleOCR Detection Test ===\n");
     
-    var imagePath = @"C:\Users\chris\OneDrive\Bilder\Camera Roll\WIN_20250108_02_38_22_Pro.jpg";
+    var imagePath = @"C:\Users\chris\OneDrive\Bilder\Camera Roll\IMG_20250108_024734.jpg";
     
     // Test with very low thresholds first
     using var detector = new DetectionModelV5Builder()
