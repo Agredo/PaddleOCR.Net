@@ -23,7 +23,7 @@
     <Folder Include="Models\Preprocessing\Orientation\Document\" />
     <Folder Include="Models\Preprocessing\Orientation\Textline\" />
     <Folder Include="Models\Preprocessing\Unwarping\" />
-    <Folder Include="Models\Recognition\" />
+    <Folder Include="DTOs\" />
   </ItemGroup>
 
 </Project>
