@@ -16,6 +16,9 @@ public class DetectionModelV5 : IDetectionModel
     private readonly float threshold;
     private readonly float boxThreshold;
     private readonly float unclipRatio;
+    private readonly bool mergeBoxes;
+    private readonly float mergeDistanceThreshold;
+    private readonly float mergeOverlapThreshold;
     private bool disposed;
 
     /// <summary>
@@ -26,12 +29,18 @@ public class DetectionModelV5 : IDetectionModel
     /// <param name="threshold">Detection threshold (default: 0.15)</param>
     /// <param name="boxThreshold">Bounding box threshold (default: 0.3)</param>
     /// <param name="unclipRatio">Ratio for expanding boxes (default: 1.6)</param>
+    /// <param name="mergeBoxes">Enable box merging for overlapping or nearby boxes (default: false)</param>
+    /// <param name="mergeDistanceThreshold">Maximum distance between boxes to merge, as ratio of box height (default: 0.5)</param>
+    /// <param name="mergeOverlapThreshold">Minimum IOU for merging overlapping boxes (default: 0.1)</param>
     public DetectionModelV5(
         string modelPath, 
         int targetSize = 960,
         float threshold = 0.15f,
         float boxThreshold = 0.3f,
-        float unclipRatio = 1.6f)
+        float unclipRatio = 1.6f,
+        bool mergeBoxes = false,
+        float mergeDistanceThreshold = 0.5f,
+        float mergeOverlapThreshold = 0.1f)
     {
         if (!File.Exists(modelPath))
             throw new FileNotFoundException($"Model file not found: {modelPath}");
@@ -40,6 +49,9 @@ public class DetectionModelV5 : IDetectionModel
         this.threshold = threshold;
         this.boxThreshold = boxThreshold;
         this.unclipRatio = unclipRatio;
+        this.mergeBoxes = mergeBoxes;
+        this.mergeDistanceThreshold = mergeDistanceThreshold;
+        this.mergeOverlapThreshold = mergeOverlapThreshold;
 
         var sessionOptions = new SessionOptions
         {
@@ -128,7 +140,11 @@ public class DetectionModelV5 : IDetectionModel
             originalSize,
             threshold,
             boxThreshold,
-            unclipRatio);
+            unclipRatio,
+            iouThreshold: 0.3f,
+            mergeBoxes,
+            mergeDistanceThreshold,
+            mergeOverlapThreshold);
 
         return new DetectionResult
         {

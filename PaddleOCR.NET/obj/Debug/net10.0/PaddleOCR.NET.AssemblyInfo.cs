@@ -15,7 +15,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyDescriptionAttribute("ONNX-based PaddleOCR implementation for .NET with Fluent API")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+8508ed2539572410fc6acc3a6caa0ebe94cdd9ce")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+6a750bad6d268b0a28424cfae74f374ebd694e9f")]
 [assembly: System.Reflection.AssemblyProductAttribute("PaddleOCR.NET")]
 [assembly: System.Reflection.AssemblyTitleAttribute("PaddleOCR.NET")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

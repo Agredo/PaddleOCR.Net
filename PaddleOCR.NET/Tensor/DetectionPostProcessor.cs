@@ -107,7 +107,7 @@ public static class DetectionPostProcessor
                 foreach (var point in points)
                 {
                     var dx = point.X - centroid.X;
-                    var dy = point.Y - centroid.Y;
+                    var dy = point.Y - centroidY;
                     var rotatedX = (float)(dx * cos - dy * sin);
                     var rotatedY = (float)(dx * sin + dy * cos);
                     rotatedPoints.Add(new PointF(rotatedX, rotatedY));
@@ -405,6 +405,9 @@ public static class DetectionPostProcessor
     /// <param name="boxThreshold">Box confidence threshold (default: 0.5)</param>
     /// <param name="unclipRatio">Ratio for expanding boxes (default: 1.6)</param>
     /// <param name="iouThreshold">IOU threshold for Non-Maximum Suppression (default: 0.3)</param>
+    /// <param name="mergeBoxes">Enable box merging for overlapping or nearby boxes (default: false)</param>
+    /// <param name="mergeDistanceThreshold">Maximum distance between boxes to merge, as ratio of box height (default: 0.5)</param>
+    /// <param name="mergeOverlapThreshold">Minimum IOU for merging overlapping boxes (default: 0.1)</param>
     /// <returns>List of bounding boxes</returns>
     public static List<BoundingBox> ExtractBoxes(
         float[] output,
@@ -416,7 +419,10 @@ public static class DetectionPostProcessor
         float threshold = 0.3f,
         float boxThreshold = 0.5f,
         float unclipRatio = 1.6f,
-        float iouThreshold = 0.3f)
+        float iouThreshold = 0.3f,
+        bool mergeBoxes = false,
+        float mergeDistanceThreshold = 0.5f,
+        float mergeOverlapThreshold = 0.1f)
     {
         var boxes = new List<BoundingBox>();
 
@@ -615,6 +621,14 @@ public static class DetectionPostProcessor
             var boxesBeforeNMS = boxes.Count;
             boxes = ApplyNMS(boxes, iouThreshold);
             Console.WriteLine($"[POST-PROCESS] NMS: {boxesBeforeNMS} -> {boxes.Count} boxes (IOU threshold={iouThreshold})");
+        }
+        
+        // Apply box merging if enabled
+        if (mergeBoxes && boxes.Count > 0)
+        {
+            var boxesBeforeMerge = boxes.Count;
+            boxes = MergeNearbyBoxes(boxes, mergeDistanceThreshold, mergeOverlapThreshold);
+            Console.WriteLine($"[POST-PROCESS] Box Merging: {boxesBeforeMerge} -> {boxes.Count} boxes (distance={mergeDistanceThreshold}, overlap={mergeOverlapThreshold})");
         }
         
         return boxes;
@@ -829,5 +843,216 @@ public static class DetectionPostProcessor
         var height = intersectMaxY - intersectMinY;
 
         return width * height;
+    }
+
+    /// <summary>
+    /// Merges nearby or overlapping bounding boxes
+    /// </summary>
+    /// <param name="boxes">List of bounding boxes</param>
+    /// <param name="distanceThreshold">Maximum distance between boxes to merge (as ratio of box height)</param>
+    /// <param name="overlapThreshold">Minimum IOU for merging overlapping boxes</param>
+    /// <returns>List of merged bounding boxes</returns>
+    private static List<BoundingBox> MergeNearbyBoxes(
+        List<BoundingBox> boxes, 
+        float distanceThreshold, 
+        float overlapThreshold)
+    {
+        if (boxes.Count <= 1)
+            return boxes;
+
+        // Create a union-find structure to track which boxes should be merged
+        var parent = Enumerable.Range(0, boxes.Count).ToArray();
+        
+        int Find(int x)
+        {
+            if (parent[x] != x)
+                parent[x] = Find(parent[x]);
+            return parent[x];
+        }
+
+        void Union(int x, int y)
+        {
+            var rootX = Find(x);
+            var rootY = Find(y);
+            if (rootX != rootY)
+                parent[rootX] = rootY;
+        }
+
+        // Check all pairs of boxes
+        for (int i = 0; i < boxes.Count; i++)
+        {
+            for (int j = i + 1; j < boxes.Count; j++)
+            {
+                if (ShouldMergeBoxes(boxes[i], boxes[j], distanceThreshold, overlapThreshold))
+                {
+                    Union(i, j);
+                    Console.WriteLine($"  Merge: Merging box {i} with box {j}");
+                }
+            }
+        }
+
+        // Group boxes by their root parent
+        var groups = new Dictionary<int, List<int>>();
+        for (int i = 0; i < boxes.Count; i++)
+        {
+            var root = Find(i);
+            if (!groups.ContainsKey(root))
+                groups[root] = new List<int>();
+            groups[root].Add(i);
+        }
+
+        // Merge boxes in each group
+        var mergedBoxes = new List<BoundingBox>();
+        foreach (var group in groups.Values)
+        {
+            if (group.Count == 1)
+            {
+                // Single box, no merging needed
+                mergedBoxes.Add(boxes[group[0]]);
+            }
+            else
+            {
+                // Merge multiple boxes
+                var boxesToMerge = group.Select(idx => boxes[idx]).ToList();
+                var merged = MergeBoxGroup(boxesToMerge);
+                mergedBoxes.Add(merged);
+                Console.WriteLine($"  Merge: Created merged box from {group.Count} boxes");
+            }
+        }
+
+        return mergedBoxes;
+    }
+
+    /// <summary>
+    /// Determines if two boxes should be merged based on distance and overlap
+    /// </summary>
+    private static bool ShouldMergeBoxes(
+        BoundingBox box1, 
+        BoundingBox box2, 
+        float distanceThreshold, 
+        float overlapThreshold)
+    {
+        // Check for overlap
+        var iou = CalculateIOU(box1, box2);
+        if (iou >= overlapThreshold)
+            return true;
+
+        // Check for proximity
+        var distance = CalculateBoxDistance(box1, box2);
+        var avgHeight = (GetBoxHeight(box1) + GetBoxHeight(box2)) / 2f;
+        var normalizedDistance = distance / avgHeight;
+
+        if (normalizedDistance <= distanceThreshold)
+        {
+            // Additional check: boxes should be roughly aligned horizontally or vertically
+            var alignment = GetBoxAlignment(box1, box2);
+            return alignment > 0.3f; // 30% overlap in horizontal or vertical direction
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Calculates the minimum distance between two bounding boxes
+    /// </summary>
+    private static float CalculateBoxDistance(BoundingBox box1, BoundingBox box2)
+    {
+        var box1MinX = box1.Points.Min(p => p.X);
+        var box1MaxX = box1.Points.Max(p => p.X);
+        var box1MinY = box1.Points.Min(p => p.Y);
+        var box1MaxY = box1.Points.Max(p => p.Y);
+
+        var box2MinX = box2.Points.Min(p => p.X);
+        var box2MaxX = box2.Points.Max(p => p.X);
+        var box2MinY = box2.Points.Min(p => p.Y);
+        var box2MaxY = box2.Points.Max(p => p.Y);
+
+        // Calculate horizontal and vertical gaps
+        float horizontalGap;
+        if (box1MaxX < box2MinX)
+            horizontalGap = box2MinX - box1MaxX;
+        else if (box2MaxX < box1MinX)
+            horizontalGap = box1MinX - box2MaxX;
+        else
+            horizontalGap = 0; // Boxes overlap horizontally
+
+        float verticalGap;
+        if (box1MaxY < box2MinY)
+            verticalGap = box2MinY - box1MaxY;
+        else if (box2MaxY < box1MinY)
+            verticalGap = box1MinY - box2MaxY;
+        else
+            verticalGap = 0; // Boxes overlap vertically
+
+        // Euclidean distance of gaps
+        return (float)Math.Sqrt(horizontalGap * horizontalGap + verticalGap * verticalGap);
+    }
+
+    /// <summary>
+    /// Calculates the alignment between two boxes (0-1, where 1 is perfect alignment)
+    /// </summary>
+    private static float GetBoxAlignment(BoundingBox box1, BoundingBox box2)
+    {
+        var box1MinX = box1.Points.Min(p => p.X);
+        var box1MaxX = box1.Points.Max(p => p.X);
+        var box1MinY = box1.Points.Min(p => p.Y);
+        var box1MaxY = box1.Points.Max(p => p.Y);
+
+        var box2MinX = box2.Points.Min(p => p.X);
+        var box2MaxX = box2.Points.Max(p => p.X);
+        var box2MinY = box2.Points.Min(p => p.Y);
+        var box2MaxY = box2.Points.Max(p => p.Y);
+
+        // Calculate horizontal overlap
+        var horizontalOverlap = Math.Max(0, Math.Min(box1MaxX, box2MaxX) - Math.Max(box1MinX, box2MinX));
+        var horizontalUnion = Math.Max(box1MaxX, box2MaxX) - Math.Min(box1MinX, box2MinX);
+        var horizontalAlignment = horizontalUnion > 0 ? horizontalOverlap / horizontalUnion : 0;
+
+        // Calculate vertical overlap
+        var verticalOverlap = Math.Max(0, Math.Min(box1MaxY, box2MaxY) - Math.Max(box1MinY, box2MinY));
+        var verticalUnion = Math.Max(box1MaxY, box2MaxY) - Math.Min(box1MinY, box2MinY);
+        var verticalAlignment = verticalUnion > 0 ? verticalOverlap / verticalUnion : 0;
+
+        // Return the best alignment
+        return Math.Max(horizontalAlignment, verticalAlignment);
+    }
+
+    /// <summary>
+    /// Gets the height of a bounding box
+    /// </summary>
+    private static float GetBoxHeight(BoundingBox box)
+    {
+        var minY = box.Points.Min(p => p.Y);
+        var maxY = box.Points.Max(p => p.Y);
+        return maxY - minY;
+    }
+
+    /// <summary>
+    /// Merges a group of boxes into a single box
+    /// </summary>
+    private static BoundingBox MergeBoxGroup(List<BoundingBox> boxes)
+    {
+        // Collect all points from all boxes
+        var allPoints = boxes.SelectMany(b => b.Points).ToList();
+
+        // Find the bounding rectangle
+        var minX = allPoints.Min(p => p.X);
+        var maxX = allPoints.Max(p => p.X);
+        var minY = allPoints.Min(p => p.Y);
+        var maxY = allPoints.Max(p => p.Y);
+
+        // Use the highest confidence
+        var maxConfidence = boxes.Max(b => b.Confidence);
+
+        // Create merged box with 4 corners
+        var mergedPoints = new[]
+        {
+            new[] { minX, minY },
+            new[] { maxX, minY },
+            new[] { maxX, maxY },
+            new[] { minX, maxY }
+        };
+
+        return new BoundingBox(mergedPoints, maxConfidence);
     }
 }
